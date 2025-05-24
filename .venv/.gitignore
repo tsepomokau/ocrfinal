@@ -1,0 +1,8 @@
+# Ignore Python virtual environments
+venv/
+ocr/venv/
+__pycache__/
+*.pyc
+
+# IDE/editor folders
+.vscode/
