@@ -503,6 +503,183 @@ async def handle_internal_server_error(request, exc):
         content={"detail": "Internal server error", "timestamp": datetime.now().isoformat()}
     )
 
+# ========================================
+# Debug Endpoints (only in debug mode)
+# ========================================
+
+if DEBUG:
+    @app.get("/debug/info")
+    async def debug_info():
+        """Debug information endpoint"""
+        return {
+            "version": VERSION,
+            "debug_mode": DEBUG,
+            "temp_folder": TEMP_FOLDER,
+            "max_file_size": MAX_FILE_SIZE,
+            "allowed_extensions": list(ALLOWED_EXTENSIONS),
+            "active_background_tasks": len(background_tasks_status),
+            "temp_files": len([f for f in os.listdir(TEMP_FOLDER) if os.path.isfile(os.path.join(TEMP_FOLDER, f))]),
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    @app.post("/debug/cleanup")
+    async def debug_cleanup():
+        """Manual cleanup endpoint for debugging"""
+        cleanup_temp_files()
+        background_tasks_status.clear()
+        return {"message": "Cleanup completed", "timestamp": datetime.now().isoformat()}
+
+# Error handlers
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Endpoint not found", "path": str(request.url.path)}
+    )
+
+@app.exception_handler(500)
+async def internal_error_handler(request, exc):
+    logger.error(f"Internal server error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "timestamp": datetime.now().isoformat()}
+    )
+
+
+# Replace your process-tariff endpoint in main.py with this:
+
+@app.post("/api/process-tariff")
+async def process_tariff_document(
+    file: UploadFile = File(...),
+    scheme: str = Query(...),
+    credentials: str = Query(...),
+    document_type: str = Query(default="tariff"),
+    processing_mode: str = Query(default="full")
+):
+    """Process uploaded tariff document - completely self-contained version"""
+    
+    print("🚨 ENDPOINT CALLED!")
+    temp_path = None
+    try:
+        # Get file content
+        content = await file.read()
+        print(f"📤 Processing document: {file.filename} ({len(content):,} bytes)")
+        
+        # Save uploaded file
+        import uuid
+        from pathlib import Path
+        
+        temp_id = str(uuid.uuid4())
+        temp_dir = Path("./temp")
+        temp_dir.mkdir(exist_ok=True)
+        
+        temp_path = temp_dir / f"{temp_id}.pdf"
+        
+        with open(temp_path, "wb") as buffer:
+            buffer.write(content)
+        
+        print(f"💾 Saved to temp file: {temp_path}")
+        
+        # Create OCR engine and process directly
+        from app.document_processor.ocr_engine_debug import OCREngine
+        
+        print(f"🔄 Creating OCR engine...")
+        ocr_engine = OCREngine()
+        
+        print(f"🔄 Starting OCR processing with PDF path: '{temp_path}'")
+        extracted_data = ocr_engine.process_sections([], str(temp_path))
+        
+        print("✅ OCR processing completed")
+        print(f"📊 Extracted data type: {type(extracted_data)}")
+        
+        if not isinstance(extracted_data, dict):
+            raise ValueError(f"OCR engine returned {type(extracted_data)}, expected dict")
+        
+        print(f"📊 OCR data keys: {list(extracted_data.keys())}")
+        
+        # Prepare final data structure
+        final_data = {
+            "header": extracted_data.get("header", {}),
+            "commodities": extracted_data.get("commodities", []),
+            "rates": extracted_data.get("rates", []),
+            "notes": extracted_data.get("notes", []),
+            "origin_info": extracted_data.get("origin_info", ""),
+            "destination_info": extracted_data.get("destination_info", ""),
+            "currency": extracted_data.get("currency", "USD"),
+            "pdf_name": file.filename,
+            "raw_text": extracted_data.get("raw_text", ""),
+            "processing_metadata": extracted_data.get("processing_metadata", {})
+        }
+        
+        print(f"✅ Final data prepared:")
+        print(f"   Commodities: {len(final_data['commodities'])}")
+        print(f"   Rates: {len(final_data['rates'])}")
+        print(f"   Notes: {len(final_data['notes'])}")
+        print(f"   Header: {final_data['header']}")
+        
+        # Save to database
+        print("💾 Starting database save...")
+        from app.database.cp_tariff_database import database
+        
+        document_id = database.save_tariff_document(final_data, str(temp_path))
+        
+        if document_id:
+            print(f"🎉 SUCCESS: Document saved with ID: {document_id}")
+        else:
+            print("❌ WARNING: Database save returned None")
+        
+        # Clean up temp file
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+            print("🧹 Temp file cleaned up")
+        
+        # Create response
+        response_data = {
+            "status": "success" if document_id else "warning",
+            "message": "Tariff document processed successfully" if document_id else "Document processed but save failed",
+            "document_id": document_id,
+            "processing_time": final_data.get("processing_metadata", {}).get("processing_time_seconds", 0),
+            "extracted_data": {
+                "header": final_data["header"],
+                "commodities": final_data["commodities"],
+                "rates": final_data["rates"],
+                "notes": final_data["notes"],
+                "origin_info": final_data["origin_info"],
+                "destination_info": final_data["destination_info"],
+                "currency": final_data["currency"]
+            },
+            "statistics": {
+                "total_rates_found": len(final_data["rates"]),
+                "total_notes_found": len(final_data["notes"]),
+                "total_commodities_found": len(final_data["commodities"]),
+                "asterisk_notes_found": len([n for n in final_data["notes"] if isinstance(n, dict) and n.get("type") == "ASTERISK"])
+            }
+        }
+        
+        print(f"📤 Returning response with status: {response_data['status']}")
+        return response_data
+        
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Clean up temp file if it exists
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+            print("🧹 Temp file cleaned up after error")
+        
+        return {
+            "status": "error", 
+            "message": f"Error processing document: {str(e)}",
+            "document_id": None,
+            "error_details": str(e)
+        }
+
+
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=DEBUG)
