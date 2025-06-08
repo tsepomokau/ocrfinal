@@ -152,7 +152,8 @@ async def verify_api_key_authentication(credentials: HTTPAuthorizationCredential
     return True
 
 # Initialize database manager
-database_manager = CPTariffDatabase()
+connection_string = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=DESKTOP-KL51D0H\\SQLEXPRESS;DATABASE=cp_tariff;Trusted_Connection=yes"
+database_manager = CPTariffDatabase(connection_string)
 
 def cleanup_temporary_files():
     """Clean up old temporary files"""
@@ -350,7 +351,7 @@ async def process_tariff_document_upload(
         print("💾 Starting database save...")
         
         try:
-            document_id = database_manager.save_tariff_document_complete(final_data, str(temp_path))
+            document_id = database_manager.save_document(final_data)
             
             if document_id:
                 print(f"🎉 SUCCESS: Document saved with ID: {document_id}")
@@ -502,7 +503,6 @@ async def handle_internal_server_error(request, exc):
         status_code=500,
         content={"detail": "Internal server error", "timestamp": datetime.now().isoformat()}
     )
-
 # ========================================
 # Debug Endpoints (only in debug mode)
 # ========================================
@@ -526,7 +526,7 @@ if DEBUG:
     @app.post("/debug/cleanup")
     async def debug_cleanup():
         """Manual cleanup endpoint for debugging"""
-        cleanup_temp_files()
+        cleanup_temporary_files()
         background_tasks_status.clear()
         return {"message": "Cleanup completed", "timestamp": datetime.now().isoformat()}
 
@@ -676,9 +676,6 @@ async def process_tariff_document(
             "document_id": None,
             "error_details": str(e)
         }
-
-
-
 
 if __name__ == "__main__":
     import uvicorn
