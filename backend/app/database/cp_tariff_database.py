@@ -1,14 +1,12 @@
 """
-Production Database Handler - Deployment Ready
-File: backend/app/database/cp_tariff_database.py
-
-Production-grade database handler with proper error handling and logging.
+Production Database Handler for CP Tariff Documents
+Clean, production-ready database operations.
 """
+
 import pyodbc
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ class CPTariffDatabase:
         logger.info("Database handler initialized")
     
     def get_database_connection(self):
-        """Get database connection with error handling"""
+        """Get database connection"""
         try:
             conn = pyodbc.connect(self.connection_string)
             return conn
@@ -30,8 +28,15 @@ class CPTariffDatabase:
             return None
     
     def save_document(self, data: Dict[str, Any]) -> Optional[int]:
-        """Save document data to database"""
+        """
+        Save tariff document data to database
         
+        Args:
+            data: Processed tariff data
+            
+        Returns:
+            Document ID if successful, None otherwise
+        """
         conn = self.get_database_connection()
         if conn is None:
             logger.error("Cannot save document - no database connection")
@@ -43,8 +48,7 @@ class CPTariffDatabase:
             # Extract header data
             header = data.get('header', {})
             
-            logger.info(f"Saving document: Item {header.get('item_number', 'N/A')}, "
-                       f"Revision {header.get('revision', 'N/A')}")
+            logger.info(f"Saving document: Item {header.get('item_number', 'N/A')}")
             
             # Insert main document record
             insert_sql = """
@@ -62,14 +66,14 @@ class CPTariffDatabase:
                 str(header.get('item_number', '')),
                 self._safe_int(header.get('revision', 0)),
                 str(header.get('cprs_number', '')),
-                self._parse_date(header.get('issue_date')),
-                self._parse_date(header.get('effective_date')),
-                self._parse_date(header.get('expiration_date')),
+                self._safe_date(header.get('issue_date')),
+                self._safe_date(header.get('effective_date')),
+                self._safe_date(header.get('expiration_date')),
                 str(header.get('change_description', '')),
-                str(data.get('pdf_name', 'unknown.pdf')),
+                str(data.get('pdf_name', '')),
                 str(data.get('origin_info', ''))[:500],
                 str(data.get('destination_info', ''))[:500],
-                str(data.get('raw_text', ''))[:4000]
+                str(data.get('raw_text', ''))[:4000]  # Limit for performance
             )
             
             # Execute insert
@@ -141,7 +145,7 @@ class CPTariffDatabase:
             try:
                 cursor.execute("""
                     INSERT INTO tariff_rates (
-                        document_id, origin, destination,
+                        document_id, origin_info, destination_info,
                         rate_value, currency, commodity_type, equipment_type,
                         created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, GETDATE())
@@ -151,7 +155,7 @@ class CPTariffDatabase:
                     str(rate.get('destination', ''))[:255],
                     self._safe_decimal(rate.get('rate_amount', '0')),
                     str(rate.get('currency', 'USD'))[:10],
-                    str(rate.get('commodity', ''))[:255],
+                    str(rate.get('train_type', ''))[:255],
                     str(rate.get('equipment_type', ''))[:100]
                 ))
                 saved_count += 1
@@ -185,43 +189,6 @@ class CPTariffDatabase:
                 continue
         
         return saved_count
-    
-    def _safe_int(self, value, default: int = 0) -> int:
-        """Safely convert value to integer"""
-        if value is None:
-            return default
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return default
-    
-    def _safe_decimal(self, value) -> Optional[float]:
-        """Safely convert value to decimal"""
-        if value is None:
-            return None
-        try:
-            if isinstance(value, str):
-                cleaned = value.replace('$', '').replace(',', '').strip()
-                return float(cleaned)
-            return float(value)
-        except (ValueError, TypeError):
-            return None
-    
-    def _parse_date(self, date_str) -> Optional[str]:
-        """Parse date string to database format"""
-        if not date_str:
-            return None
-        
-        # If already in YYYY-MM-DD format, return as is
-        if isinstance(date_str, str) and len(date_str) == 10 and date_str.count('-') == 2:
-            try:
-                # Validate date format
-                datetime.strptime(date_str, '%Y-%m-%d')
-                return date_str
-            except ValueError:
-                pass
-        
-        return str(date_str)
     
     def get_database_statistics(self) -> Dict[str, Any]:
         """Get database statistics"""
@@ -308,7 +275,7 @@ class CPTariffDatabase:
             
             # Get rates
             cursor.execute("""
-                SELECT origin, destination, rate_value, currency, equipment_type
+                SELECT origin_info, destination_info, rate_value, currency, equipment_type
                 FROM tariff_rates 
                 WHERE document_id = ?
             """, (doc_id,))
@@ -335,9 +302,9 @@ class CPTariffDatabase:
                     "item_number": doc_row[0],
                     "revision": doc_row[1],
                     "cprs_number": doc_row[2],
-                    "issue_date": doc_row[3],
-                    "effective_date": doc_row[4],
-                    "expiration_date": doc_row[5],
+                    "issue_date": doc_row[3].isoformat() if doc_row[3] else None,
+                    "effective_date": doc_row[4].isoformat() if doc_row[4] else None,
+                    "expiration_date": doc_row[5].isoformat() if doc_row[5] else None,
                     "pdf_name": doc_row[6],
                     "origin_info": doc_row[7],
                     "destination_info": doc_row[8],
@@ -373,3 +340,39 @@ class CPTariffDatabase:
         finally:
             if conn:
                 conn.close()
+    
+    def _safe_int(self, value, default: int = 0) -> int:
+        """Safely convert value to integer"""
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    
+    def _safe_decimal(self, value) -> Optional[float]:
+        """Safely convert value to decimal"""
+        if value is None:
+            return None
+        try:
+            if isinstance(value, str):
+                cleaned = value.replace('$', '').replace(',', '').strip()
+                return float(cleaned)
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    
+    def _safe_date(self, date_str) -> Optional[str]:
+        """Safely convert date string to database format"""
+        if not date_str:
+            return None
+        
+        # If already in YYYY-MM-DD format, return as is
+        if isinstance(date_str, str) and len(date_str) == 10 and date_str.count('-') == 2:
+            try:
+                datetime.strptime(date_str, '%Y-%m-%d')
+                return date_str
+            except ValueError:
+                pass
+        
+        return str(date_str)[:10]  # Truncate if too long
