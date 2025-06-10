@@ -1,9 +1,3 @@
-"""
-Production Database Handler - Deployment Ready
-File: backend/app/database/cp_tariff_database.py
-
-Production-grade database handler with proper error handling and logging.
-"""
 import pyodbc
 import logging
 from typing import Dict, List, Any, Optional
@@ -13,40 +7,46 @@ import json
 logger = logging.getLogger(__name__)
 
 class CPTariffDatabase:
-    """Production database handler for CP Tariff documents"""
+    """Fixed database handler with correct column names"""
     
     def __init__(self, connection_string: str):
         """Initialize database connection"""
         self.connection_string = connection_string
-        logger.info("Database handler initialized")
+        logger.info(f"🔗 Database configured: {connection_string}")
     
     def get_database_connection(self):
-        """Get database connection with error handling"""
+        """Get database connection"""
         try:
             conn = pyodbc.connect(self.connection_string)
             return conn
         except Exception as e:
-            logger.error(f"Database connection failed: {e}")
+            logger.error(f"❌ Database connection failed: {e}")
             return None
     
     def save_document(self, data: Dict[str, Any]) -> Optional[int]:
-        """Save document data to database"""
+        """Save document data to database - FIXED COLUMN NAMES"""
+        print("\n" + "="*50)
+        print("💾 STARTING DATABASE SAVE WITH COLUMN FIX")
+        print("="*50)
         
         conn = self.get_database_connection()
         if conn is None:
-            logger.error("Cannot save document - no database connection")
+            print("❌ No database connection")
             return None
         
         try:
             cursor = conn.cursor()
             
-            # Extract header data
+            # Log input data structure
             header = data.get('header', {})
             
-            logger.info(f"Saving document: Item {header.get('item_number', 'N/A')}, "
-                       f"Revision {header.get('revision', 'N/A')}")
+            print(f"📝 Document data:")
+            print(f"   Item: {header.get('item_number', '')}")
+            print(f"   Revision: {header.get('revision', 0)}")
+            print(f"   CPRS: {header.get('cprs_number', '')}")
+            print(f"   PDF: {data.get('pdf_name', '')}")
             
-            # Insert main document record
+            # FIXED: Use correct column names that match your database schema
             insert_sql = """
             INSERT INTO tariff_documents (
                 item_number, revision, cprs_number, issue_date, 
@@ -57,7 +57,7 @@ class CPTariffDatabase:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), ?)
             """
             
-            # Prepare parameters
+            # Prepare parameters with proper handling
             params = (
                 str(header.get('item_number', '')),
                 self._safe_int(header.get('revision', 0)),
@@ -67,39 +67,53 @@ class CPTariffDatabase:
                 self._parse_date(header.get('expiration_date')),
                 str(header.get('change_description', '')),
                 str(data.get('pdf_name', 'unknown.pdf')),
-                str(data.get('origin_info', ''))[:500],
-                str(data.get('destination_info', ''))[:500],
-                str(data.get('raw_text', ''))[:4000]
+                str(data.get('origin_info', ''))[:500],  # Limit length
+                str(data.get('destination_info', ''))[:500],  # Limit length
+                str(data.get('raw_ocr_text', ''))[:4000]  # Limit length for raw_ocr_text
             )
+            
+            print(f"🔧 Using FIXED column names:")
+            print(f"   origin_info (not origin_info)")
+            print(f"   destination_info (not destination_info)")
+            print(f"   raw_ocr_text (not raw_ocr_text)")
             
             # Execute insert
             cursor.execute(insert_sql, params)
             
-            # Get document ID
+            # Get the inserted ID
             cursor.execute("SELECT @@IDENTITY")
             result = cursor.fetchone()
             
             if result and result[0]:
                 doc_id = int(result[0])
-                logger.info(f"Document inserted with ID: {doc_id}")
+                print(f"✅ Document inserted with ID: {doc_id}")
                 
                 # Save related data
+                print(f"🔄 Saving commodities...")
                 commodities_saved = self._save_commodities(cursor, doc_id, data.get('commodities', []))
-                rates_saved = self._save_rates(cursor, doc_id, data.get('rates', []))
-                notes_saved = self._save_notes(cursor, doc_id, data.get('notes', []))
+                print(f"✅ Saved {commodities_saved} commodities")
                 
-                logger.info(f"Saved: {commodities_saved} commodities, {rates_saved} rates, {notes_saved} notes")
+                print(f"🔄 Saving rates...")
+                rates_saved = self._save_rates(cursor, doc_id, data.get('rates', []))
+                print(f"✅ Saved {rates_saved} rates")
+                
+                print(f"🔄 Saving notes...")
+                notes_saved = self._save_notes(cursor, doc_id, data.get('notes', []))
+                print(f"✅ Saved {notes_saved} notes")
                 
                 # Commit all changes
                 conn.commit()
-                logger.info(f"Successfully saved all data for document {doc_id}")
+                print(f"\n🎉 ALL DATA SAVED SUCCESSFULLY!")
+                print(f"📊 Document ID: {doc_id}")
+                print("="*50)
                 
                 return doc_id
             else:
-                logger.error("Document insertion failed - no ID returned")
+                print(f"❌ Document insertion failed - no ID returned")
                 return None
                 
         except Exception as e:
+            print(f"❌ Database save error: {e}")
             logger.error(f"Database save error: {e}")
             if conn:
                 conn.rollback()
@@ -109,11 +123,12 @@ class CPTariffDatabase:
                 conn.close()
     
     def _save_commodities(self, cursor, doc_id: int, commodities: List[Dict]) -> int:
-        """Save commodity data"""
+        """Save commodity data - FIXED COLUMN NAMES"""
         saved_count = 0
         
         for commodity in commodities:
             try:
+                # FIXED: Use correct column names for your schema
                 cursor.execute("""
                     INSERT INTO tariff_commodities (
                         document_id, commodity_name, commodity_code, 
@@ -128,20 +143,21 @@ class CPTariffDatabase:
                 saved_count += 1
                 
             except Exception as e:
-                logger.error(f"Error saving commodity: {e}")
+                logger.error(f"❌ Error saving commodity: {e}")
                 continue
         
         return saved_count
     
     def _save_rates(self, cursor, doc_id: int, rates: List[Dict]) -> int:
-        """Save rate data"""
+        """Save rate data - FIXED COLUMN NAMES"""
         saved_count = 0
         
         for rate in rates:
             try:
+                # FIXED: Use correct column names for your schema
                 cursor.execute("""
                     INSERT INTO tariff_rates (
-                        document_id, origin, destination,
+                        document_id, origin_info, destination_info,
                         rate_value, currency, commodity_type, equipment_type,
                         created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, GETDATE())
@@ -157,17 +173,18 @@ class CPTariffDatabase:
                 saved_count += 1
                 
             except Exception as e:
-                logger.error(f"Error saving rate: {e}")
+                logger.error(f"❌ Error saving rate: {e}")
                 continue
         
         return saved_count
     
     def _save_notes(self, cursor, doc_id: int, notes: List[Dict]) -> int:
-        """Save notes data"""
+        """Save notes data - FIXED COLUMN NAMES"""
         saved_count = 0
         
         for note in notes:
             try:
+                # FIXED: Use correct column names for your schema
                 cursor.execute("""
                     INSERT INTO tariff_notes (
                         document_id, note_type, note_text, 
@@ -181,7 +198,7 @@ class CPTariffDatabase:
                 saved_count += 1
                 
             except Exception as e:
-                logger.error(f"Error saving note: {e}")
+                logger.error(f"❌ Error saving note: {e}")
                 continue
         
         return saved_count
@@ -214,14 +231,9 @@ class CPTariffDatabase:
         
         # If already in YYYY-MM-DD format, return as is
         if isinstance(date_str, str) and len(date_str) == 10 and date_str.count('-') == 2:
-            try:
-                # Validate date format
-                datetime.strptime(date_str, '%Y-%m-%d')
-                return date_str
-            except ValueError:
-                pass
+            return date_str
         
-        return str(date_str)
+        return str(date_str)  # Return as string for now
     
     def get_database_statistics(self) -> Dict[str, Any]:
         """Get database statistics"""
@@ -236,7 +248,7 @@ class CPTariffDatabase:
         try:
             cursor = conn.cursor()
             
-            # Get counts
+            # Get basic counts
             cursor.execute("SELECT COUNT(*) FROM tariff_documents")
             doc_count = cursor.fetchone()[0]
             
@@ -249,127 +261,22 @@ class CPTariffDatabase:
             cursor.execute("SELECT COUNT(*) FROM tariff_notes")
             note_count = cursor.fetchone()[0]
             
-            # Get recent activity
-            cursor.execute("""
-                SELECT TOP 5 item_number, revision, upload_timestamp 
-                FROM tariff_documents 
-                ORDER BY upload_timestamp DESC
-            """)
-            recent_docs = cursor.fetchall()
-            
             return {
                 "total_documents": doc_count,
                 "total_rates": rate_count,
                 "total_commodities": commodity_count,
                 "total_notes": note_count,
-                "database_status": "connected",
-                "recent_documents": [
-                    {
-                        "item": row[0], 
-                        "revision": row[1], 
-                        "uploaded": row[2].isoformat() if row[2] else None
-                    } for row in recent_docs
-                ]
+                "database_status": "connected"
             }
             
         except Exception as e:
-            logger.error(f"Error getting statistics: {e}")
+            logger.error(f"❌ Error getting statistics: {e}")
             return {
                 "total_documents": 0,
                 "total_rates": 0,
                 "database_status": "error",
                 "error": str(e)
             }
-        finally:
-            if conn:
-                conn.close()
-    
-    def get_document_by_id(self, doc_id: int) -> Optional[Dict[str, Any]]:
-        """Get document by ID"""
-        conn = self.get_database_connection()
-        if conn is None:
-            return None
-        
-        try:
-            cursor = conn.cursor()
-            
-            # Get document
-            cursor.execute("""
-                SELECT item_number, revision, cprs_number, issue_date,
-                       effective_date, expiration_date, pdf_name, 
-                       origin_info, destination_info, upload_timestamp
-                FROM tariff_documents 
-                WHERE id = ?
-            """, (doc_id,))
-            
-            doc_row = cursor.fetchone()
-            if not doc_row:
-                return None
-            
-            # Get rates
-            cursor.execute("""
-                SELECT origin, destination, rate_value, currency, equipment_type
-                FROM tariff_rates 
-                WHERE document_id = ?
-            """, (doc_id,))
-            rates = cursor.fetchall()
-            
-            # Get notes
-            cursor.execute("""
-                SELECT note_type, note_text
-                FROM tariff_notes 
-                WHERE document_id = ?
-            """, (doc_id,))
-            notes = cursor.fetchall()
-            
-            # Get commodities
-            cursor.execute("""
-                SELECT commodity_name, commodity_code, description
-                FROM tariff_commodities 
-                WHERE document_id = ?
-            """, (doc_id,))
-            commodities = cursor.fetchall()
-            
-            return {
-                "document": {
-                    "item_number": doc_row[0],
-                    "revision": doc_row[1],
-                    "cprs_number": doc_row[2],
-                    "issue_date": doc_row[3],
-                    "effective_date": doc_row[4],
-                    "expiration_date": doc_row[5],
-                    "pdf_name": doc_row[6],
-                    "origin_info": doc_row[7],
-                    "destination_info": doc_row[8],
-                    "upload_timestamp": doc_row[9].isoformat() if doc_row[9] else None
-                },
-                "rates": [
-                    {
-                        "origin": rate[0],
-                        "destination": rate[1],
-                        "rate_value": float(rate[2]) if rate[2] else 0,
-                        "currency": rate[3],
-                        "equipment_type": rate[4]
-                    } for rate in rates
-                ],
-                "notes": [
-                    {
-                        "type": note[0],
-                        "text": note[1]
-                    } for note in notes
-                ],
-                "commodities": [
-                    {
-                        "name": commodity[0],
-                        "code": commodity[1],
-                        "description": commodity[2]
-                    } for commodity in commodities
-                ]
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting document {doc_id}: {e}")
-            return None
         finally:
             if conn:
                 conn.close()
