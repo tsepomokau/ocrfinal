@@ -1,54 +1,47 @@
+"""
+CP Tariff OCR API - Production Version
+Clean production-ready FastAPI application for processing CP Rail tariff documents.
+"""
+
 import os
-import sys 
 import uuid
 import time
+import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import json
-import logging
-from contextlib import asynccontextmanager
 
-# Import enhanced components
-from app.document_processor.ocr_engine_enhanced import EnhancedOCREngine as OCREngine
-from app.document_processor.enhanced_data_processor import EnhancedDataProcessor
-from app.database.cp_tariff_database_fixed import CPTariffDatabaseFixed
+# Import production components
+from app.document_processor.ocr_engine import OCREngine
+from app.document_processor.ai_data_processor import AIDataProcessor
+from app.database.cp_tariff_database import CPTariffDatabase
 
-# Configuration
+# Production Configuration
 TEMP_FOLDER = "./temp"
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-DEBUG = True
-VERSION = "2.2.0-Enhanced"
+VERSION = "3.0.0"
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("cp_tariff_api_enhanced")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("cp_tariff_api")
 
 # Create directories
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-@asynccontextmanager
-async def application_lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    logger.info("🚀 Starting Enhanced CP Tariff OCR API")
-    logger.info(f"Version: {VERSION}")
-    logger.info("✨ Features: Enhanced Data Processing + Fixed Database")
-    
-    yield
-    
-    logger.info("🛑 Shutting down Enhanced CP Tariff OCR API")
-
 # Initialize FastAPI app
 app = FastAPI(
-    title="CP Tariff OCR API - Enhanced",
-    description="Enhanced OCR system for CP Tariff documents with improved data processing and database handling",
+    title="CP Tariff OCR API",
+    description="Production OCR system for Canadian Pacific Railway tariff documents",
     version=VERSION,
-    docs_url="/docs",
-    lifespan=application_lifespan
+    docs_url="/docs"
 )
 
 # Configure CORS
@@ -60,30 +53,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize enhanced components
-connection_string = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=DESKTOP-KL51D0H\\SQLEXPRESS;DATABASE=cp_tariff;Trusted_Connection=yes"
-database_manager = CPTariffDatabaseFixed(connection_string)
-data_processor = EnhancedDataProcessor()
+# Initialize production components
+connection_string = os.getenv(
+    "DB_CONNECTION_STRING",
+    "DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost\\SQLEXPRESS;DATABASE=cp_tariff;Trusted_Connection=yes"
+)
+database_manager = CPTariffDatabase(connection_string)
+ai_processor = AIDataProcessor()
+
+@app.on_event("startup")
+async def startup_event():
+    """Application startup tasks"""
+    logger.info(f"Starting CP Tariff OCR API v{VERSION}")
+    logger.info("Production mode: Sample data disabled")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Application shutdown tasks"""
+    logger.info("Shutting down CP Tariff OCR API")
 
 @app.get("/")
-async def get_api_root():
-    """Root endpoint"""
+async def root():
+    """API root endpoint"""
     return {
-        "message": "CP Tariff OCR API - Enhanced with Data Processing",
+        "service": "CP Tariff OCR API",
         "version": VERSION,
         "status": "operational",
-        "features": [
-            "Enhanced OCR Processing",
-            "Improved Data Extraction",
-            "Fixed Database Handling",
-            "Better Error Recovery"
-        ],
         "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/health")
-async def get_health_status():
-    """Enhanced health check endpoint"""
+async def health_check():
+    """Health check endpoint"""
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -91,161 +92,138 @@ async def get_health_status():
         "checks": {}
     }
     
-    # Test OCR engine
-    try:
-        test_ocr = OCREngine()
-        health_status["checks"]["ocr_engines"] = {
-            "tesseract_available": test_ocr.use_tesseract,
-            "paddle_available": test_ocr.use_paddle,
-            "status": "operational"
-        }
-    except Exception as e:
-        health_status["checks"]["ocr_engines"] = {
-            "status": "error",
-            "error": str(e)
-        }
-    
     # Test database connection
     try:
-        db_test = database_manager.test_database_connection()
-        health_status["checks"]["database"] = {
-            "status": "connected" if db_test else "disconnected",
-            "connection_string": "SQL Server Express (configured)"
+        conn = database_manager.get_database_connection()
+        if conn:
+            conn.close()
+            health_status["checks"]["database"] = "connected"
+        else:
+            health_status["checks"]["database"] = "disconnected"
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["checks"]["database"] = f"error: {str(e)}"
+        health_status["status"] = "unhealthy"
+    
+    # Test OCR engines
+    try:
+        ocr_engine = OCREngine()
+        ocr_capabilities = ocr_engine.get_ocr_capabilities()
+        health_status["checks"]["ocr_engines"] = {
+            "paddle_ocr": ocr_capabilities.get("paddle_ocr", False),
+            "tesseract": ocr_capabilities.get("tesseract", False),
+            "pdf_text_layer": ocr_capabilities.get("pdf_text_layer", True)
         }
         
-        if db_test:
-            stats = database_manager.get_database_statistics()
-            health_status["checks"]["database"]["statistics"] = stats
+        if not any([ocr_capabilities.get("paddle_ocr"), ocr_capabilities.get("tesseract")]):
+            health_status["status"] = "degraded"
+            
     except Exception as e:
-        health_status["checks"]["database"] = {
-            "status": "error",
-            "error": str(e)
-        }
+        health_status["checks"]["ocr_engines"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
     
-    # Test data processor
+    # Test AI processor
     try:
-        test_data = {'header': {'item_number': 'TEST'}, 'commodities': [], 'rates': [], 'notes': []}
-        processed = data_processor.process_extracted_data(test_data)
-        health_status["checks"]["data_processor"] = {
-            "status": "operational",
-            "test_processing": "successful"
+        health_status["checks"]["ai_enhancement"] = {
+            "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
+            "ai_processor_available": ai_processor.ai_available
         }
     except Exception as e:
-        health_status["checks"]["data_processor"] = {
-            "status": "error",
-            "error": str(e)
-        }
+        health_status["checks"]["ai_enhancement"] = f"error: {str(e)}"
     
     return health_status
 
 @app.post("/api/process-tariff")
-async def process_tariff_document_enhanced(
+async def process_tariff_document(
     file: UploadFile = File(...),
-    extract_tables: bool = Query(True, description="Extract table data"),
-    ocr_engine: str = Query("tesseract", description="OCR engine to use"),
-    enhance_data: bool = Query(True, description="Use enhanced data processing")
+    extract_tables: bool = Query(True, description="Extract table data")
 ):
-    """Enhanced tariff document processing with improved data handling"""
+    """
+    Process CP tariff document and extract structured data
     
-    print("🚨 ENHANCED TARIFF PROCESSING CALLED!")
-    print(f"🔧 Enhanced Data Processing: {'Enabled' if enhance_data else 'Disabled'}")
+    Args:
+        file: PDF or image file containing tariff document
+        extract_tables: Whether to extract table structures
     
+    Returns:
+        Structured tariff data including rates, commodities, and notes
+    """
     temp_path = None
     start_time = time.time()
     
     try:
-        # Get file content
+        # Validate file
         content = await file.read()
         file_size = len(content)
         
-        # Validate file
         if file_size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail=f"File too large. Maximum size: {MAX_FILE_SIZE:,} bytes")
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size: {MAX_FILE_SIZE:,} bytes"
+            )
         
         file_ext = file.filename.split('.')[-1].lower() if file.filename else ""
         if file_ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            )
         
-        print(f"📤 Processing: {file.filename} ({file_size:,} bytes)")
+        logger.info(f"Processing document: {file.filename} ({file_size:,} bytes)")
         
-        # Save uploaded file
+        # Save temporary file
         temp_id = str(uuid.uuid4())
-        from pathlib import Path
-        
-        temp_dir = Path(TEMP_FOLDER)
-        temp_dir.mkdir(exist_ok=True)
-        
-        temp_path = temp_dir / f"{temp_id}.{file_ext}"
+        temp_path = Path(TEMP_FOLDER) / f"{temp_id}.{file_ext}"
         
         with open(temp_path, "wb") as buffer:
             buffer.write(content)
         
-        print(f"💾 Saved to: {temp_path}")
+        # OCR Processing
+        logger.info("Starting OCR extraction")
+        ocr_engine = OCREngine(use_paddle=True, use_tesseract=True)
+        raw_ocr_data = ocr_engine.extract_text_from_pdf(str(temp_path))
         
-        # Enhanced OCR Processing
-        print("🔄 Starting enhanced OCR extraction...")
-        ocr_engine_instance = OCREngine(use_tesseract=True, use_paddle=False)
+        # AI-Enhanced Data Processing
+        logger.info("Processing extracted data with AI enhancement")
+        processed_data = ai_processor.process_tariff_data(
+            raw_text=raw_ocr_data,
+            filename=file.filename,
+            file_size=file_size
+        )
         
-        raw_extracted_data = ocr_engine_instance.process_sections([], str(temp_path))
-        
-        print("✅ OCR extraction completed")
-        
-        # Enhanced Data Processing
-        if enhance_data:
-            print("🚀 Starting enhanced data processing...")
-            
-            # Add file metadata
-            raw_extracted_data['pdf_name'] = file.filename
-            raw_extracted_data['file_size_bytes'] = file_size
-            
-            processed_data = data_processor.process_extracted_data(raw_extracted_data)
-            print("✅ Enhanced data processing completed")
-        else:
-            print("⚠️  Using basic data processing (enhanced disabled)")
-            processed_data = raw_extracted_data
-        
-        # Prepare final data with processing time
         processing_time = time.time() - start_time
-        processed_data['processing_metadata']['processing_time_seconds'] = processing_time
-        processed_data['processing_metadata']['file_size_bytes'] = file_size
+        logger.info(f"Processing completed in {processing_time:.2f}s")
         
-        print(f"📊 Final data summary:")
-        print(f"   Rates: {len(processed_data.get('rates', []))}")
-        print(f"   Notes: {len(processed_data.get('notes', []))}")
-        print(f"   Commodities: {len(processed_data.get('commodities', []))}")
-        print(f"   Processing time: {processing_time:.2f}s")
+        # Database Save
+        document_id = None
+        database_success = False
+        database_error = None
         
-        # Enhanced Database Save
-        print("💾 Starting enhanced database save...")
         try:
+            logger.info("Saving to database")
             document_id = database_manager.save_document(processed_data)
             
             if document_id:
-                print(f"🎉 Successfully saved with ID: {document_id}")
                 database_success = True
-                database_error = None
+                logger.info(f"Document saved with ID: {document_id}")
             else:
-                database_success = False
-                database_error = database_manager.get_last_error()
-                print(f"❌ Database save failed: {database_error}")
+                database_error = "Save operation returned no ID"
+                logger.warning("Database save failed: No ID returned")
+                
         except Exception as db_error:
-            print(f"❌ Database error: {db_error}")
-            database_success = False
             database_error = str(db_error)
-            document_id = None
+            logger.error(f"Database save error: {db_error}")
         
         # Clean up
         if temp_path and temp_path.exists():
             temp_path.unlink()
-            print("🧹 Cleaned up temp file")
         
-        # Enhanced Response
-        response_data = {
+        # Prepare response
+        response = {
             "status": "success" if database_success else "warning",
-            "message": "Document processed successfully" if database_success else "Processed but database save failed",
+            "message": "Document processed successfully" if database_success else "Processed but not saved to database",
             "document_id": document_id,
-            "processing_time": round(processing_time, 2),
-            "database_error": database_error,
+            "processing_time_seconds": round(processing_time, 2),
             "extracted_data": {
                 "header": processed_data.get("header", {}),
                 "commodities": processed_data.get("commodities", []),
@@ -256,35 +234,25 @@ async def process_tariff_document_enhanced(
                 "currency": processed_data.get("currency", "USD")
             },
             "statistics": {
-                "total_rates_found": len(processed_data.get("rates", [])),
-                "total_notes_found": len(processed_data.get("notes", [])),
-                "total_commodities_found": len(processed_data.get("commodities", [])),
-                "tables_extracted": processed_data.get("processing_metadata", {}).get("tables_found", 0),
-                "rates_processed": processed_data.get("processing_metadata", {}).get("rates_processed", 0),
-                "notes_processed": processed_data.get("processing_metadata", {}).get("notes_processed", 0),
-                "commodities_processed": processed_data.get("processing_metadata", {}).get("commodities_processed", 0)
-            },
-            "processing_metadata": processed_data.get("processing_metadata", {}),
-            "enhancement_features": {
-                "enhanced_data_processing": enhance_data,
-                "improved_database_handling": True,
-                "advanced_error_recovery": True,
-                "data_validation": True
+                "rates_found": len(processed_data.get("rates", [])),
+                "notes_found": len(processed_data.get("notes", [])),
+                "commodities_found": len(processed_data.get("commodities", [])),
+                "tables_extracted": processed_data.get("metadata", {}).get("tables_found", 0)
             }
         }
         
-        # Log final status
-        if database_success:
-            print(f"🎊 PROCESSING COMPLETE - SUCCESS!")
-        else:
-            print(f"⚠️  PROCESSING COMPLETE - WITH WARNINGS")
+        if database_error:
+            response["database_error"] = database_error
         
-        print(f"📤 Returning response with status: {response_data['status']}")
-        return response_data
+        return response
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        print(f"❌ PROCESSING ERROR: {e}")
+        logger.error(f"Processing error: {e}")
         
+        # Clean up on error
         if temp_path and temp_path.exists():
             temp_path.unlink()
         
@@ -292,170 +260,57 @@ async def process_tariff_document_enhanced(
             status_code=500,
             detail={
                 "status": "error",
-                "message": f"Error processing document: {str(e)}",
-                "document_id": None,
+                "message": f"Processing failed: {str(e)}",
                 "timestamp": datetime.now().isoformat()
             }
         )
 
 @app.get("/api/statistics")
-async def get_database_statistics():
-    """Get enhanced database statistics"""
+async def get_statistics():
+    """Get database statistics"""
     try:
         stats = database_manager.get_database_statistics()
-        
-        # Add additional computed statistics
-        enhanced_stats = {
+        return {
+            "status": "success",
             "statistics": stats,
-            "computed_metrics": {
-                "documents_per_day": 0,  # Could be calculated from upload timestamps
-                "average_rates_per_document": 0,
-                "most_common_commodities": [],
-                "processing_success_rate": "N/A"
-            },
-            "system_info": {
-                "version": VERSION,
-                "database_type": "SQL Server Express",
-                "ocr_engines": ["Tesseract", "Enhanced Processing"],
-                "features_enabled": [
-                    "Enhanced Data Processing",
-                    "Improved Database Handling",
-                    "Advanced Error Recovery"
-                ]
-            },
             "timestamp": datetime.now().isoformat()
         }
-        
-        # Calculate averages if we have data
-        if stats.get("total_documents", 0) > 0:
-            total_rates = stats.get("total_rates", 0)
-            total_docs = stats["total_documents"]
-            enhanced_stats["computed_metrics"]["average_rates_per_document"] = round(total_rates / total_docs, 2)
-        
-        return enhanced_stats
-        
     except Exception as e:
-        logger.error(f"Error getting statistics: {e}")
+        logger.error(f"Error retrieving statistics: {e}")
         raise HTTPException(
             status_code=500,
-            detail={
-                "status": "error",
-                "message": f"Error retrieving statistics: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            }
+            detail=f"Failed to retrieve statistics: {str(e)}"
         )
 
-@app.get("/debug/info")
-async def get_enhanced_debug_info():
-    """Enhanced debug information"""
+@app.get("/api/document/{document_id}")
+async def get_document(document_id: int):
+    """Retrieve processed document by ID"""
     try:
-        test_ocr = OCREngine()
-        ocr_info = {
-            "tesseract_available": test_ocr.use_tesseract,
-            "paddle_available": test_ocr.use_paddle
-        }
-    except Exception as e:
-        ocr_info = {"error": str(e)}
-    
-    # Test database
-    try:
-        db_test = database_manager.test_database_connection()
-        db_info = {
-            "connection_status": "connected" if db_test else "disconnected",
-            "last_error": database_manager.get_last_error()
-        }
-    except Exception as e:
-        db_info = {"error": str(e)}
-    
-    return {
-        "version": VERSION,
-        "platform": "Windows",
-        "temp_folder": TEMP_FOLDER,
-        "ocr_engines": ocr_info,
-        "database": db_info,
-        "data_processor": {
-            "status": "available",
-            "features": [
-                "Enhanced Rate Parsing",
-                "Improved Location Extraction", 
-                "Advanced Data Validation",
-                "Smart Error Recovery"
-            ]
-        },
-        "enhancement_features": {
-            "enhanced_data_processing": True,
-            "improved_database_handling": True,
-            "advanced_error_recovery": True,
-            "data_quality_validation": True
-        },
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/debug/test-processing")
-async def test_enhanced_processing():
-    """Test enhanced processing components"""
-    test_results = {
-        "timestamp": datetime.now().isoformat(),
-        "tests": {}
-    }
-    
-    # Test OCR Engine
-    try:
-        ocr_engine = OCREngine()
-        test_results["tests"]["ocr_engine"] = {
+        document = database_manager.get_document_by_id(document_id)
+        
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        return {
             "status": "success",
-            "tesseract_available": ocr_engine.use_tesseract,
-            "paddle_available": ocr_engine.use_paddle
+            "document": document,
+            "timestamp": datetime.now().isoformat()
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        test_results["tests"]["ocr_engine"] = {
-            "status": "error",
-            "error": str(e)
-        }
-    
-    # Test Data Processor
-    try:
-        test_data = {
-            'header': {'item_number': '12345', 'revision': '1'},
-            'commodities': [{'name': 'Test Grain', 'stcc_code': '01 123 45'}],
-            'rates': [{'origin': 'Test City AB', 'destination': 'Test Dest IL', 'rate_amount': '123.45'}],
-            'notes': [{'type': 'TEST', 'text': 'Test note'}]
-        }
-        
-        processor = EnhancedDataProcessor()
-        processed = processor.process_extracted_data(test_data)
-        
-        test_results["tests"]["data_processor"] = {
-            "status": "success",
-            "processed_rates": len(processed.get('rates', [])),
-            "processed_notes": len(processed.get('notes', [])),
-            "processed_commodities": len(processed.get('commodities', []))
-        }
-    except Exception as e:
-        test_results["tests"]["data_processor"] = {
-            "status": "error",
-            "error": str(e)
-        }
-    
-    # Test Database
-    try:
-        db_test = database_manager.test_database_connection()
-        test_results["tests"]["database"] = {
-            "status": "success" if db_test else "failed",
-            "connection_test": db_test
-        }
-        
-        if db_test:
-            stats = database_manager.get_database_statistics()
-            test_results["tests"]["database"]["statistics"] = stats
-    except Exception as e:
-        test_results["tests"]["database"] = {
-            "status": "error",
-            "error": str(e)
-        }
-    
-    return test_results
+        logger.error(f"Error retrieving document {document_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve document: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=DEBUG)
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,  # Production mode
+        log_level="info"
+    )
