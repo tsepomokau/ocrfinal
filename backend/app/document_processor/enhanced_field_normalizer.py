@@ -1,286 +1,407 @@
-import re
+import os
 import json
+import re
 from typing import Dict, List, Any, Optional
-import openai
 from datetime import datetime
+import logging
 
-from config import OPENAI_API_KEY
+# Handle OpenAI import gracefully
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
+
+logger = logging.getLogger(__name__)
 
 class EnhancedFieldNormalizer:
-    """Enhanced class for normalizing CP Tariff fields and extracting structured data."""
+    """Enhanced field normalizer with AI and rule-based extraction"""
     
-    def __init__(self, ocr_text: str, pdf_name: str = ""):
-        """Initialize with OCR text and PDF name."""
+    def __init__(self, ocr_text: str = "", pdf_name: str = ""):
+        """
+        Initialize the enhanced field normalizer
+        Args:
+            ocr_text: OCR extracted text (for backward compatibility)
+            pdf_name: PDF filename (for backward compatibility)
+        """
         self.ocr_text = ocr_text
         self.pdf_name = pdf_name
-        openai.api_key = OPENAI_API_KEY
+        self.openai_client = None
+        self.ai_available = False
+        self.setup_openai()
     
-    def normalize(self) -> Dict[str, Any]:
-        """Extract and normalize all tariff data using GPT-4."""
-        # Construct the enhanced prompt
-        prompt = self._create_enhanced_prompt()
-        
-        # Call OpenAI API
+    def setup_openai(self):
+        """Setup OpenAI client - FIXED VERSION"""
+        if not OPENAI_AVAILABLE:
+            logger.warning("⚠️ OpenAI library not available")
+            return
+            
         try:
-            response = openai.chat.completions.create(
-                model="gpt-4",
+            api_key = os.getenv('OPENAI_API_KEY')
+            if api_key and api_key.strip() and not api_key.startswith('your_'):
+                # FIXED: Proper OpenAI client initialization for v1.0+
+                self.openai_client = OpenAI(api_key=api_key)
+                self.ai_available = True
+                logger.info("✅ OpenAI API configured successfully")
+            else:
+                logger.warning("⚠️ OPENAI_API_KEY not configured, using rule-based extraction only")
+                self.ai_available = False
+        except Exception as e:
+            logger.error(f"❌ Error setting up OpenAI: {e}")
+            self.ai_available = False
+    
+    def normalize_tariff_data(self) -> Dict[str, Any]:
+        """
+        Main method for normalizing tariff data - for backward compatibility
+        """
+        if self.ocr_text:
+            raw_data = {'raw_text': self.ocr_text}
+            return self.enhance_extracted_data(raw_data)
+        else:
+            logger.warning("No OCR text provided for normalization")
+            return self._get_empty_result()
+    
+    def enhance_extracted_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhance extracted data using AI and rule-based methods"""
+        
+        # Always start with rule-based enhancement
+        enhanced_data = self._rule_based_enhancement(raw_data)
+        
+        # Try AI enhancement if available
+        if self.ai_available and self.openai_client:
+            try:
+                logger.info("🤖 Attempting AI-powered extraction...")
+                ai_enhanced = self._ai_enhanced_extraction(raw_data)
+                
+                # Merge AI results with rule-based results
+                enhanced_data = self._merge_extraction_results(enhanced_data, ai_enhanced)
+                logger.info("✅ AI enhancement completed")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ AI extraction failed: {e}")
+                logger.info("🔄 Falling back to rule-based extraction...")
+        else:
+            logger.info("🔄 Using rule-based extraction only (AI not available)")
+        
+        # Add metadata
+        enhanced_data['pdf_name'] = self.pdf_name
+        enhanced_data['processing_method'] = 'AI_ENHANCED' if self.ai_available else 'RULE_BASED'
+        enhanced_data['processing_timestamp'] = datetime.now().isoformat()
+        
+        return enhanced_data
+    
+    def _ai_enhanced_extraction(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Use OpenAI to enhance field extraction - FIXED VERSION"""
+        if not self.openai_client:
+            raise Exception("OpenAI client not available")
+        
+        raw_text = data.get('raw_text', '')
+        if not raw_text.strip():
+            raise Exception("No text available for AI processing")
+        
+        # FIXED: Updated to work with OpenAI >= 1.0.0 API
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
                 messages=[
                     {
-                        "role": "system", 
-                        "content": "You are an expert in processing Canadian Pacific Railway tariff documents. Extract comprehensive structured data from OCR text of CP Tariff documents with high accuracy."
+                        "role": "system",
+                        "content": """You are a tariff document parser. Extract structured data from Canadian Pacific Railway tariff documents.
+                        
+Return a JSON object with these fields:
+- header: {item_number, revision, cprs_number, issue_date, effective_date, expiration_date, change_description}
+- rates: [{origin, destination, rate_value, commodity, equipment_type}]
+- notes: [{type, description, applies_to}]
+- commodities: [{name, code, classification}]
+
+Only return valid JSON, no explanations."""
                     },
                     {
                         "role": "user", 
-                        "content": prompt
+                        "content": f"Extract data from this tariff document:\n\n{raw_text[:3000]}"
                     }
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.0
+                max_tokens=1500,
+                temperature=0.1,
+                timeout=30
             )
             
-            # Parse the response
-            result = json.loads(response.choices[0].message.content)
+            # FIXED: Updated response handling for new API
+            ai_result = response.choices[0].message.content
             
-            # Post-process the result
-            return self._post_process_result(result)
-            
+            # Parse JSON response
+            try:
+                parsed_result = json.loads(ai_result)
+                logger.info("✅ AI extraction successful")
+                return parsed_result
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ AI returned invalid JSON: {e}")
+                return {}
+                
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
-            # Fallback to enhanced rule-based extraction
-            return self._extract_fields_enhanced()
+            logger.error(f"❌ Error calling OpenAI API: {e}")
+            raise
     
-    def _create_enhanced_prompt(self) -> str:
-        """Create an enhanced prompt for OpenAI API."""
-        return f"""
-Extract comprehensive data from this CP Tariff OCR text. The document contains railway shipping rates and terms.
-
-REQUIRED FIELDS TO EXTRACT:
-
-1. HEADER INFORMATION:
-   - Item Number (ITEM: followed by number)
-   - Revision Number (REVISION: followed by number)
-   - CPRS Number (CPRS followed by alphanumeric)
-   - Issue Date (ISSUED: followed by date)
-   - Effective Date (EFFECTIVE: followed by date)
-   - Expiration Date (EXPIRES: followed by date)
-   - Change Description (CHANGE: followed by description)
-
-2. COMMODITY INFORMATION:
-   - Commodity Names and descriptions
-   - STCC Codes (Standard Transportation Commodity Codes)
-
-3. ORIGIN AND DESTINATION:
-   - Origin locations (cities, states/provinces)
-   - Destination locations (cities, states/provinces)
-
-4. RATE DATA:
-   - All rate tables with origins, destinations, and rates
-   - Rate categories (A, B, C, D columns)
-   - Train types (Single Cars, 25 Cars, Unit Train, etc.)
-   - Car capacity types (Low Cap, High Cap)
-   - Route codes and descriptions
-
-5. NOTES AND PROVISIONS:
-   - Equipment notes (A -, B -, C - descriptions)
-   - Numbered provisions (1 -, 2 -, 3 - descriptions)
-   - Asterisk notes (* - descriptions)
-   - Route information
-   - General notes and conditions
-
-6. CURRENCY AND EQUIPMENT:
-   - Currency type (USD, CAD)
-   - Equipment specifications
-   - Mileage allowance information
-
-Return ONLY valid JSON in this exact format:
-{{
-    "header": {{
-        "item_number": "string",
-        "revision": "string",
-        "cprs_number": "string",
-        "issue_date": "string",
-        "effective_date": "string",
-        "expiration_date": "string",
-        "change_description": "string"
-    }},
-    "commodities": [
-        {{
-            "commodity_name": "string",
-            "stcc_code": "string",
-            "description": "string"
-        }}
-    ],
-    "origin_info": "string",
-    "destination_info": "string",
-    "currency": "string",
-    "rates": [
-        {{
-            "origin": "string",
-            "destination": "string",
-            "origin_state": "string",
-            "destination_state": "string",
-            "rate_category": "string",
-            "rate_amount": "number",
-            "train_type": "string",
-            "car_capacity_type": "string",
-            "route_code": "string",
-            "additional_provisions": "string",
-            "provision_codes": ["string"]
-        }}
-    ],
-    "notes": [
-        {{
-            "note_type": "string",
-            "note_code": "string",
-            "note_text": "string"
-        }}
-    ],
-    "route_info": "string",
-    "equipment_info": "string"
-}}
-
-OCR TEXT:
-{self.ocr_text}
-"""
-    
-    def _post_process_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Post-process the AI result to clean and validate data."""
-        # Clean and validate dates
-        if 'header' in result:
-            header = result['header']
-            for date_field in ['issue_date', 'effective_date', 'expiration_date']:
-                if date_field in header and header[date_field]:
-                    header[date_field] = self._parse_date(header[date_field])
+    def _rule_based_enhancement(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhanced rule-based extraction - WORKING VERSION"""
+        logger.info("🔄 Using enhanced rule-based extraction...")
         
-        # Clean rate amounts
-        if 'rates' in result:
-            for rate in result['rates']:
-                if 'rate_amount' in rate and rate['rate_amount']:
-                    # Clean currency symbols and commas
-                    amount_str = str(rate['rate_amount']).replace('$', '').replace(',', '')
-                    try:
-                        rate['rate_amount'] = float(amount_str)
-                    except ValueError:
-                        rate['rate_amount'] = None
-        
-        # Add PDF name
-        result['pdf_name'] = self.pdf_name
-        
-        return result
-    
-    def _parse_date(self, date_str: str) -> str:
-        """Parse and standardize date formats."""
-        if not date_str:
-            return None
-            
-        # Common CP Tariff date formats
-        date_patterns = [
-            r'([A-Z]{3})\s+(\d{1,2}),?\s+(\d{4})',  # JAN 01, 2024
-            r'(\d{1,2})/(\d{1,2})/(\d{4})',         # 01/01/2024
-            r'(\d{4})-(\d{2})-(\d{2})',             # 2024-01-01
-        ]
-        
-        for pattern in date_patterns:
-            match = re.search(pattern, date_str.upper())
-            if match:
-                try:
-                    if len(match.groups()) == 3:
-                        if match.group(1).isalpha():  # Month name format
-                            month_names = {
-                                'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
-                                'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
-                                'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12'
-                            }
-                            month = month_names.get(match.group(1), '01')
-                            day = match.group(2).zfill(2)
-                            year = match.group(3)
-                            return f"{year}-{month}-{day}"
-                        else:
-                            # Numeric format
-                            if '-' in date_str:  # YYYY-MM-DD
-                                return date_str
-                            else:  # MM/DD/YYYY
-                                month = match.group(1).zfill(2)
-                                day = match.group(2).zfill(2)
-                                year = match.group(3)
-                                return f"{year}-{month}-{day}"
-                except:
-                    pass
-        
-        return date_str  # Return original if parsing fails
-    
-    def _extract_fields_enhanced(self) -> Dict[str, Any]:
-        """Enhanced fallback extraction method."""
-        result = {
-            "header": {},
-            "commodities": [],
-            "origin_info": "",
-            "destination_info": "",
-            "currency": "USD",
-            "rates": [],
-            "notes": [],
-            "route_info": "",
-            "equipment_info": "",
-            "pdf_name": self.pdf_name
+        raw_text = data.get('raw_text', '')
+        enhanced_data = {
+            'header': {},
+            'commodities': [],
+            'rates': [],
+            'notes': [],
+            'origin_info': '',
+            'destination_info': '',
+            'currency': 'USD',
+            'route_info': '',
+            'equipment_info': ''
         }
         
-        # Extract header information
-        header_patterns = {
-            'item_number': r'ITEM:\s*(\d+)',
-            'revision': r'REVISION:\s*(\d+)',
-            'cprs_number': r'CPRS\s+([A-Z0-9-]+)',
-            'issue_date': r'ISSUED:\s*([A-Z]{3}\s+\d{1,2},?\s+\d{4})',
-            'effective_date': r'EFFECTIVE:\s*([A-Z]{3}\s+\d{1,2},?\s+\d{4})',
-            'expiration_date': r'EXPIRES:\s*([A-Z]{3}\s+\d{1,2},?\s+\d{4})',
-            'change_description': r'CHANGE:\s*([^\n]+)'
+        if not raw_text:
+            return enhanced_data
+        
+        # Enhanced header extraction
+        enhanced_data['header'] = self._extract_header_fields(raw_text)
+        
+        # Enhanced rates extraction  
+        enhanced_data['rates'] = self._extract_rates(raw_text)
+        
+        # Enhanced notes extraction
+        enhanced_data['notes'] = self._extract_notes(raw_text)
+        
+        # Enhanced commodities extraction
+        enhanced_data['commodities'] = self._extract_commodities(raw_text)
+        
+        # Extract origin/destination
+        origin, destination = self._extract_origin_destination(raw_text)
+        enhanced_data['origin_info'] = origin
+        enhanced_data['destination_info'] = destination
+        
+        # Extract currency
+        enhanced_data['currency'] = self._extract_currency(raw_text)
+        
+        logger.info(f"📊 Rule-based extraction complete:")
+        logger.info(f"   - Header fields: {len(enhanced_data['header'])}")
+        logger.info(f"   - Commodities: {len(enhanced_data['commodities'])}")
+        logger.info(f"   - Rates: {len(enhanced_data['rates'])}")
+        logger.info(f"   - Notes: {len(enhanced_data['notes'])}")
+        
+        return enhanced_data
+    
+    def _extract_header_fields(self, text: str) -> Dict[str, Any]:
+        """Extract header fields using enhanced patterns"""
+        header = {}
+        
+        patterns = {
+            'item_number': [
+                r'ITEM\s+(\d+)',
+                r'Item\s+Number:?\s*(\d+)',
+                r'(?:^|\s)(\d{5,6})(?:\s|$)'
+            ],
+            'revision': [
+                r'REVISION\s+(\d+)',
+                r'Rev\.?\s*(\d+)',
+                r'Revision:?\s*(\d+)'
+            ],
+            'cprs_number': [
+                r'CPRS\s+(\d+-[A-Z])',
+                r'(\d{4}-[A-Z])',
+                r'CPRS[:\s]+(\d+-[A-Z])'
+            ],
+            'issue_date': [
+                r'ISSUE\s+DATE[:\s]+(\d{4}-\d{2}-\d{2})',
+                r'Issued:?\s*(\d{4}-\d{2}-\d{2})',
+                r'(\d{4}-\d{2}-\d{2})'
+            ],
+            'effective_date': [
+                r'EFFECTIVE\s+DATE[:\s]+(\d{4}-\d{2}-\d{2})',
+                r'Effective:?\s*(\d{4}-\d{2}-\d{2})'
+            ],
+            'expiration_date': [
+                r'EXPIR(?:ATION|Y)\s+DATE[:\s]+(\d{4}-\d{2}-\d{2})',
+                r'Expires?:?\s*(\d{4}-\d{2}-\d{2})'
+            ],
+            'change_description': [
+                r'CHANGE\s+DESCRIPTION[:\s]+([A-Z\s]+)',
+                r'(?:RENEWAL|AMENDMENT|NEW|CANCELLATION)'
+            ]
         }
         
-        for field, pattern in header_patterns.items():
-            match = re.search(pattern, self.ocr_text, re.IGNORECASE)
-            if match:
-                value = match.group(1).strip()
-                if 'date' in field:
-                    value = self._parse_date(value)
-                result['header'][field] = value
+        for field, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    value = match.group(1).strip() if match.groups() else match.group(0).strip()
+                    header[field] = value
+                    logger.info(f"✅ Found {field}: {value}")
+                    break
         
-        # Extract commodities and STCC codes
-        commodity_matches = re.findall(r'([A-Z\s,]+)\s+STCC:\s*(\d{2}\s+\d{3}\s+\d{2})', self.ocr_text, re.IGNORECASE)
-        for commodity_match in commodity_matches:
-            result['commodities'].append({
-                'commodity_name': commodity_match[0].strip(),
-                'stcc_code': commodity_match[1],
-                'description': ''
-            })
+        return header
+    
+    def _extract_rates(self, text: str) -> List[Dict[str, Any]]:
+        """Extract rate information"""
+        rates = []
         
-        # Extract currency information
-        if re.search(r'(USD|US\s+FUNDS|UNITED STATES)', self.ocr_text, re.IGNORECASE):
-            result['currency'] = 'USD'
-        elif re.search(r'(CAD|CDN|CANADIAN)', self.ocr_text, re.IGNORECASE):
-            result['currency'] = 'CAD'
-        
-        # Extract origin and destination
-        origin_match = re.search(r'ORIGIN:\s*([^\n_]+)', self.ocr_text, re.IGNORECASE)
-        if origin_match:
-            result['origin_info'] = origin_match.group(1).strip()
-        
-        dest_match = re.search(r'DESTINATION:\s*([^\n_]+)', self.ocr_text, re.IGNORECASE)
-        if dest_match:
-            result['destination_info'] = dest_match.group(1).strip()
-        
-        # Extract notes (A -, B -, 1 -, 2 -, * -)
-        note_patterns = [
-            (r'^([A-Z])\s*-\s*([^\n]+)', 'EQUIPMENT'),
-            (r'^(\d+)\s*-\s*([^\n]+)', 'PROVISION'),
-            (r'^(\*)\s*-?\s*([^\n]+)', 'ASTERISK'),
+        # Look for rate patterns
+        rate_patterns = [
+            r'([A-Z\s]+)\s+-\s+\$(\d+\.?\d*)',
+            r'TO\s+DESTINATION\s+([A-Z])\s+([A-Z])\s+([A-Z])\s+ROUTE\s+([^$]+)\$(\d+\.?\d*)',
+            r'(\w+(?:\s+\w+)*)\s+\$(\d+(?:\.\d+)?)'
         ]
         
-        for pattern, note_type in note_patterns:
-            matches = re.findall(pattern, self.ocr_text, re.MULTILINE | re.IGNORECASE)
+        for pattern in rate_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
             for match in matches:
-                result['notes'].append({
-                    'note_type': note_type,
-                    'note_code': match[0],
-                    'note_text': match[1].strip()
-                })
+                if len(match.groups()) >= 2:
+                    rate = {
+                        'origin': match.group(1).strip() if len(match.groups()) > 1 else '',
+                        'destination': match.group(2).strip() if len(match.groups()) > 2 else '',
+                        'rate_amount': match.group(-1).strip(),  # Last group is usually the rate
+                        'currency': 'CAD',
+                        'rate_category': 'standard',
+                        'train_type': '',
+                        'car_capacity_type': '',
+                        'route_code': '',
+                        'additional_provisions': ''
+                    }
+                    rates.append(rate)
+                    logger.info(f"✅ Found rate: {rate}")
         
-        return result
+        return rates
+    
+    def _extract_notes(self, text: str) -> List[Dict[str, Any]]:
+        """Extract notes and conditions"""
+        notes = []
+        
+        # Look for equipment notes, conditions, etc.
+        note_patterns = [
+            r'(RAILWAY/SHIPPER OWNED/LEASED [^.]+)',
+            r'(EQUIPMENT:[^.]+)',
+            r'(NOTE:[^.]+)',
+            r'(CONDITIONS?:[^.]+)'
+        ]
+        
+        for i, pattern in enumerate(note_patterns):
+            matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                note = {
+                    'type': 'EQUIPMENT' if 'EQUIPMENT' in match.group(0).upper() else 'GENERAL',
+                    'code': f'NOTE_{i+1}',
+                    'text': match.group(1).strip(),
+                    'sort_order': i
+                }
+                notes.append(note)
+                logger.info(f"✅ Found note ({note['type']}): {note['text'][:50]}...")
+        
+        return notes
+    
+    def _extract_commodities(self, text: str) -> List[Dict[str, Any]]:
+        """Extract commodity information"""
+        commodities = []
+        
+        # Common commodity patterns
+        commodity_patterns = [
+            r'COMMODITY[:\s]+([^,\n]+)',
+            r'([A-Z\s]+GRAIN[A-Z\s]*)',
+            r'([A-Z\s]+WHEAT[A-Z\s]*)',
+            r'([A-Z\s]+CORN[A-Z\s]*)'
+        ]
+        
+        for pattern in commodity_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                commodity = {
+                    'name': match.group(1).strip(),
+                    'stcc_code': '',
+                    'description': match.group(1).strip()
+                }
+                commodities.append(commodity)
+        
+        return commodities
+    
+    def _extract_origin_destination(self, text: str) -> tuple:
+        """Extract origin and destination information"""
+        # Look for "from X to Y" or "X to Y" patterns
+        route_pattern = r'(?:from\s+)?([A-Z][A-Za-z\s,]+?)\s+to\s+([A-Z][A-Za-z\s,]+?)(?:\s|$|\.)'
+        match = re.search(route_pattern, text, re.IGNORECASE)
+        
+        if match:
+            origin = match.group(1).strip()
+            destination = match.group(2).strip()
+            return origin, destination
+        
+        # Fallback patterns
+        if 'western canada' in text.lower():
+            origin = "Western Canada"
+        elif 'vancouver' in text.lower():
+            origin = "Vancouver, BC"
+        else:
+            origin = ""
+            
+        if 'chicago' in text.lower():
+            destination = "Chicago, IL"
+        else:
+            destination = ""
+            
+        return origin, destination
+    
+    def _extract_currency(self, text: str) -> str:
+        """Extract currency information"""
+        if re.search(r'(CAD|CDN|CANADIAN)', text, re.IGNORECASE):
+            return 'CAD'
+        elif re.search(r'(USD|US\s+FUNDS|UNITED STATES)', text, re.IGNORECASE):
+            return 'USD'
+        return 'USD'  # Default
+    
+    def _merge_extraction_results(self, rule_based: Dict, ai_enhanced: Dict) -> Dict[str, Any]:
+        """Merge rule-based and AI extraction results"""
+        
+        # Start with rule-based results
+        merged = rule_based.copy()
+        
+        # Enhance with AI results where available and better
+        if ai_enhanced:
+            # Merge headers (AI takes precedence for missing fields)
+            if 'header' in ai_enhanced:
+                for key, value in ai_enhanced['header'].items():
+                    if key not in merged['header'] or not merged['header'][key]:
+                        merged['header'][key] = value
+            
+            # Add AI rates if rule-based found none
+            if 'rates' in ai_enhanced and not merged['rates']:
+                merged['rates'] = ai_enhanced['rates']
+            
+            # Add AI notes if rule-based found few
+            if 'notes' in ai_enhanced and len(merged['notes']) < 3:
+                merged['notes'].extend(ai_enhanced['notes'])
+            
+            # Add AI commodities if rule-based found none  
+            if 'commodities' in ai_enhanced and not merged['commodities']:
+                merged['commodities'] = ai_enhanced['commodities']
+        
+        return merged
+    
+    def _get_empty_result(self) -> Dict[str, Any]:
+        """Return empty result structure"""
+        return {
+            'header': {},
+            'commodities': [],
+            'rates': [],
+            'notes': [],
+            'origin_info': '',
+            'destination_info': '',
+            'currency': 'USD',
+            'route_info': '',
+            'equipment_info': '',
+            'pdf_name': self.pdf_name,
+            'processing_method': 'EMPTY',
+            'processing_timestamp': datetime.now().isoformat()
+        }
+
+    # Alias method for backward compatibility
+    def normalize(self) -> Dict[str, Any]:
+        """Alias for normalize_tariff_data method"""
+        return self.normalize_tariff_data()
