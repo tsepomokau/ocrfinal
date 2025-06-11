@@ -1,8 +1,3 @@
-"""
-Enhanced Database Handler for CP Tariff Documents
-Fixed database save issues and improved error handling
-"""
-
 import pyodbc
 import logging
 from typing import Dict, List, Any, Optional
